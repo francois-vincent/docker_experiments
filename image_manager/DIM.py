@@ -74,20 +74,20 @@ class DockerRunParameters(dict):
                 host, guest = port.rsplit(':', 1)
                 guest = int(guest)
                 port_bindings[guest] = int(host)
-                self.ports.append(guest)
+                self['ports'].append(guest)
             elif '-' in port:
                 start, end = port.split('-')
                 for p in xrange(int(start), int(end) + 1):
                     port_bindings[p] = None
-                    self.ports.append(p)
+                    self['ports'].append(p)
             else:
                 port = int(port)
                 port_bindings[port] = None
-                self.ports.append(port)
+                self['ports'].append(port)
         else:
             port_bindings[port] = None
-            self.ports.append(port)
-        self.ports.sort()
+            self['ports'].append(port)
+        self['ports'].sort()
 
     def finalize(self):
         if self.kwargs:
