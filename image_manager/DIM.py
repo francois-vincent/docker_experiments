@@ -3,35 +3,12 @@
 from __future__ import unicode_literals, print_function
 from io import BytesIO
 import os
-import random
 
 import docker
+docker_client, log = None, None
 
-docker_client = docker.Client(base_url='unix://var/run/docker.sock', version='auto')
+from utils import *
 
-
-# Helper functions and classes
-# ============================
-
-def wait(iterable):
-    for line in iterable:
-        log.debug(line)
-        if line.startswith(b'{"errorDetail'):
-            raise RuntimeError("Build failed @" + line)
-
-
-def random_hex(len=32):
-    return ''.join(random.choice('0123456789abcdef') for _ in xrange(len))
-
-
-def render(string, context):
-    if isinstance(string, unicode):
-        string = string.encode('utf-8')
-    return string.format(context)
-
-
-# Main classes
-# ============
 
 class DockerRunParameters(dict):
     """
@@ -40,18 +17,18 @@ class DockerRunParameters(dict):
 
     def __init__(self, **options):
         dict.__init__(self)
-        self.kwargs = {}
-        self['volumes'] = []
-        self['ports'] = []
         volumes = options.pop('volumes', None)
         ports = options.pop('ports', None)
+        self.update(options)
+        self.kwargs = {}
+        self['volumes'] = set()
+        self['ports'] = set()
         if volumes:
             for vol in volumes:
                 self.add_volume(vol)
         if ports:
             for port in ports:
                 self.add_port(port)
-        self.update(options)
         self.finalize()
 
     def add_volume(self, vol):
@@ -63,8 +40,8 @@ class DockerRunParameters(dict):
         else:
             mode = 'rw'
         host = os.path.abspath(os.path.expanduser(host))
-        self['volumes'].append(guest)
         binds[host] = {'bind': guest, 'mode': mode}
+        self['volumes'].add(guest)
 
     def add_port(self, port):
         port_bindings = self.kwargs.setdefault('port_bindings', {})
@@ -74,24 +51,28 @@ class DockerRunParameters(dict):
                 host, guest = port.rsplit(':', 1)
                 guest = int(guest)
                 port_bindings[guest] = int(host)
-                self['ports'].append(guest)
+                self['ports'].add(guest)
             elif '-' in port:
                 start, end = port.split('-')
                 for p in xrange(int(start), int(end) + 1):
                     port_bindings[p] = None
-                    self['ports'].append(p)
+                    self['ports'].add(p)
             else:
                 port = int(port)
                 port_bindings[port] = None
-                self['ports'].append(port)
+                self['ports'].add(port)
         else:
             port_bindings[port] = None
-            self['ports'].append(port)
-        self['ports'].sort()
+            self['ports'].add(port)
 
     def finalize(self):
         if self.kwargs:
             self['host_config'] = docker.utils.create_host_config(**self.kwargs)
+
+    def __add__(self, other):
+        res = dict(self)
+        res.update(other)
+        return res
 
 
 class DockerImageManager(object):
@@ -101,24 +82,18 @@ class DockerImageManager(object):
       raw or template.
     - Run an image with a set of parameters.
     - Commit a container.
+    Each instance can manage a single image.
     """
 
     def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-        if not self.dockerfile_string and not self.dockerfile_name and not self.image_name:
-            raise RuntimeError("You have to specify a Dockerfile "
-                               "(dockerfile_string or dockerfile_name) or an image name")
-        self.log = getattr(self, 'log', log)
-        self.image_name = getattr(self, 'image_name', random_hex())
-        self.log.debug("{}.__init__(image_name={})".format(self.__class__.__name__, self.image_name))
-
-    # Helper methods
-    # --------------
-
-    def get_container_name(self):
-        if not getattr(self, 'container_name'):
-            self.container_name = self.image_name[:12] + '_' + random_hex(10)
-        return self.container_name
+        kwargs['image'] = self.image_name = kwargs.pop('image_name', random_hex())
+        self.log = kwargs.pop('log', log)
+        self.dockerfile_string = kwargs.pop('dockerfile_string', None)
+        self.dockerfile_name = kwargs.pop('dockerfile_name', None)
+        if self.dockerfile_name:
+            self.dockerfile_name = os.path.abspath(os.path.expanduser(self.dockerfile_name))
+        self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
+        self.parameters = DockerRunParameters(**kwargs)
 
     def get_dockerfile(self):
         """ Docker file is pecified either via a string or a file.
@@ -133,64 +108,99 @@ class DockerImageManager(object):
                 dockerfile = f.read()
         return BytesIO(render(dockerfile, getattr(self, 'dockerfile_variables', {})))
 
-    # Image methods
-    # -------------
+    def pull(self, tag=None):
+        if tag:
+            docker_client.pull(self.image_name, tag)
+        else:
+            docker_client.pull(self.image_name)
+        return self
 
-    def image_build(self):
+    def build(self):
         self.log.info("Building image {}".format(self.image_name))
         wait(docker_client.build(fileobj=self.get_dockerfile(), tag=self.image_name, rm=True))
         return self
 
-    def image_destroy(self, image_name=None):
+    def push(self, image_name=None, tag=None):
         image_name = image_name or self.image_name
-        print("Removing image '{}'".format(image_name))
+        if tag:
+            self.log.info("Pushing image '{}:{}'".format(image_name, tag))
+            docker_client.push(image_name, tag)
+        else:
+            self.log.info("Pushing image '{}'".format(image_name))
+            docker_client.push(image_name)
+        return self
+
+    def inspect(self):
+        return docker_client.inspect_image(image_id=self.image_name)
+
+    def remove_image(self, image_name=None):
+        image_name = image_name or self.image_name
         try:
             docker_client.remove_image(image=image_name)
+            self.log.info("Removing image '{}'".format(image_name))
         except docker.errors.APIError:
-            print("  image not found")
+            self.log.warning("Can't remove image '{}': not found".format(image_name))
         return self
 
-    # Container methods
-    # -----------------
+    def get_container(self, container_name=None):
+        return DockerContainerManager(self, container_name)
 
-    def container_create(self, parameters, start=True):
-        kwargs = dict(image=self.image_name, name=self.container_name, hostname=self.host)
-        if self.volumes or self.ports:
-            kwargs['host_config'] = self.host_config
-            if self.ports:
-                kwargs['ports'] = self.ports
-            if self.volumes:
-                kwargs['volumes'] = self.volumes
-        try:
-            self.container = docker_client.create_container(**kwargs).get('Id')
-        except docker.errors.APIError:
-            docker_client.pull(self.image_name)
-            self.container = docker_client.create_container(**kwargs).get('Id')
+    def create_container(self, container_name=None, start=True):
+        return DockerContainerManager(self, container_name).create_container(start)
+
+
+class DockerContainerManager(object):
+    """
+    A class to manage docker containers
+    """
+    def __init__(self, image, **kwargs):
+        self.image = image
+        self.image_name = image.image_name
+        kwargs['name'] = self.container_name = kwargs.pop('container_name', self.image_name[:12] + '_' + random_hex(10))
+        self.parameters = self.image.parameters + kwargs
+
+    def create(self, start=True):
+        if find_container(container=self.container_name):
+            raise RuntimeError("Container '{}' already exists".format(self.container_name))
+        else:
+            parameters = self.image.parameters + self.parameters
+            try:
+                docker_client.create_container(**parameters)
+            except docker.errors.APIError:
+                self.image.pull()
+                docker_client.create_container(**parameters)
+            if start:
+                self.start()
         return self
 
-    def container_start(self):
+    def start(self):
+        docker_client.start(self.container_name)
         return self
 
-    def container_inspect(self, field='NetworkSettings.IPAddress'):
-        config = docker_client.inspect_container(container=self.get_container_name())
+    def inspect(self, field='NetworkSettings.IPAddress'):
+        config = docker_client.inspect_container(self.container_name)
         if field:
             for x in field.split('.'):
                 if x:
                     config = config.get(x)
         return config
 
-    def container_exec(self):
+    def exec_container(self, cmd):
+        id = docker_client.exec_create(self.container_name, cmd, stdout=False, stdin=False)
+        docker_client.exec_start(execid=id, detach=True)
         return self
 
-    def container_copy(self):
-        return self
+    def copy_from_container(self, path):
+        return docker_client.copy(self.container_name, path)
 
-    def container_stop(self):
+    def stop(self):
+        docker_client.stop(self.container_name)
         return self
 
     def commit(self, image_name):
-        docker_client.commit(self.get_container_name(), image_name)
+        docker_client.commit(self.container_name, image_name)
         return self
 
-    def container_remove(self):
+    def remove_container(self):
+        docker_client.remove_container(self.container_name)
         return self
