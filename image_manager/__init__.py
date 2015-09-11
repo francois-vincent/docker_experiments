@@ -3,8 +3,6 @@
 import logging
 import sys
 
-import docker
-
 import DIM, utils
 
 
@@ -15,6 +13,6 @@ def get_stdout_logger(log_level, name=__name__):
     out_hdlr.setLevel(log_level)
     log.addHandler(out_hdlr)
     log.setLevel(log_level)
+    return log
 
-DIM.log = get_stdout_logger(logging.DEBUG)
-utils.docker_client = DIM.docker_client = docker.Client(base_url='unix://var/run/docker.sock', version='auto')
+utils.log = DIM.log = get_stdout_logger(logging.DEBUG)

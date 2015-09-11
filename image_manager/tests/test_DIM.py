@@ -100,8 +100,6 @@ class TestDockerImage(unittest.TestCase):
         assert dim.image_name == 'navitia'
         assert dim.parameters == {'image': 'navitia'}
         assert dim.log == DIM.log
-        assert dim.dockerfile_string == None
-        assert dim.dockerfile_name == None
         DIM.log.debug.assert_called_with(u"New DockerImageManager(image_name='navitia')")
 
 

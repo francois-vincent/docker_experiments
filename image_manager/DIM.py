@@ -1,13 +1,20 @@
 # encoding: utf-8
 
+"""
+DIM: Docker Image Manager
+A set of convenience classes to create and manage Docker Images and Containers
+"""
+
 from __future__ import unicode_literals, print_function
+from contextlib import contextmanager
 from io import BytesIO
 import os
 
 import docker
-docker_client, log = None, None
 
-from utils import *
+from utils import wait, random_hex, render, chain_temp_files
+
+docker_client = docker.Client(base_url='unix://var/run/docker.sock', version='auto')
 
 
 class DockerRunParameters(dict):
@@ -18,16 +25,14 @@ class DockerRunParameters(dict):
 
     def __init__(self, **options):
         dict.__init__(self)
-        volumes = options.pop('volumes', None)
-        ports = options.pop('ports', None)
+        volumes = options.pop('volumes', ())
+        ports = options.pop('ports', ())
         self.update(options)
         self.kwargs = {}
-        if volumes:
-            for vol in volumes:
-                self.add_volume(vol)
-        if ports:
-            for port in ports:
-                self.add_port(port)
+        for vol in volumes:
+            self.add_volume(vol)
+        for port in ports:
+            self.add_port(port)
         self.finalize()
 
     def add_volume(self, vol):
@@ -79,35 +84,58 @@ class DockerRunParameters(dict):
 class DockerImageManager(object):
     """
     A class to manage Docker images, wich features:
-    - Create a new image out of a Dockerfile that can be inline or file,
+    - Creating a new image out of a Dockerfile that can be inline or file,
       raw or template.
-    - Run an image with a set of parameters.
-    - Commit a container.
-    Each instance can manage a single image.
+    - Running an image with a set of parameters.
+    - Pushing an image to dockerhub, provided the user is logged in.
+    An instance manages a single image.
     """
 
-    def __init__(self, **kwargs):
-        kwargs['image'] = self.image_name = kwargs.pop('image_name', random_hex())
+    def __init__(self, *files, **kwargs):
+        kwargs['image'] = self.image_name = kwargs.pop('image_name', None) or self.random_name()
         self.log = kwargs.pop('log', log)
-        self.dockerfile_string = kwargs.pop('dockerfile_string', None)
-        self.dockerfile_name = kwargs.pop('dockerfile_name', None)
-        if self.dockerfile_name:
-            self.dockerfile_name = os.path.abspath(os.path.expanduser(self.dockerfile_name))
-        self.parameters = DockerRunParameters(**kwargs)
         self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
+        # this is the universal context used by every template involved in the build process
+        # templates can be Dockerfile, configuration files, ...
+        self.template_context = kwargs.pop('template_context', None) or {}
+        self.parameters = DockerRunParameters(**kwargs)
+        self.files = {}
+        # a file can be a real file, specified by a path,
+        # or a pseudo file, specified via a (name, content) pair
+        for file in files:
+            if isinstance(file, tuple):
+                name, content = file
+            else:
+                name = os.path.basename(file)
+                with open(os.path.abspath(os.path.expanduser(file)), 'rb') as f:
+                    content = f.read()
+            if name == 'Dockerfile':
+                self.dockerfile = content
+                self.enrich_dockerfile()
+            else:
+                self.files[name] = content
 
+    @staticmethod
+    def random_name():
+        return random_hex()
+
+    def enrich_dockerfile(self):
+        if 'ports' in self.parameters and not '\nEXPOSE' in self.dockerfile:
+            ports = list(self.parameters['ports'])
+            ports.sort()
+            add_on = '\n\nEXPOSE ' + ' '.join(str(p) for p in ports)
+            self.dockerfile += add_on
+        if 'volumes' in self.parameters and not '\nVOLUME' in self.dockerfile:
+            add_on = '\n\nVOLUME ["' + '" "'.join(str(p) for p in self.parameters['volumes']) + '"]'
+            self.dockerfile += add_on
+
+    @contextmanager
     def get_dockerfile(self):
-        """ Docker file is pecified either via a string or a file.
+        """ Docker file is specified either via a string or a file.
             Then it is rendered according to an optional context (dictionary).
         """
-        if not self.dockerfile_string and not self.dockerfile_name:
-            raise RuntimeError("You have to specify a Dockerfile (dockerfile_string or dockerfile_name)")
-        if self.dockerfile_string:
-            dockerfile = self.dockerfile_string
-        else:
-            with open(self.dockerfile_name, 'rb') as f:
-                dockerfile = f.read()
-        return BytesIO(render(dockerfile, getattr(self, 'dockerfile_variables', {})))
+        with chain_temp_files(self.files, self.template_context):
+            yield BytesIO(render(self.dockerfile, self.template_context))
 
     def pull(self, tag=None):
         if tag:
@@ -118,7 +146,8 @@ class DockerImageManager(object):
 
     def build(self):
         self.log.info("Building image {}".format(self.image_name))
-        wait(docker_client.build(fileobj=self.get_dockerfile(), tag=self.image_name, rm=True))
+        with self.get_dockerfile() as dockerfile:
+            wait(docker_client.build(fileobj=dockerfile, tag=self.image_name, rm=True))
         return self
 
     def push(self, image_name=None, tag=None):
@@ -158,7 +187,7 @@ class DockerContainerManager(object):
         self.image = image
         self.image_name = image.image_name
         self.log = image.log
-        kwargs['name'] = self.container_name = kwargs.pop('container_name', self.random_name())
+        kwargs['name'] = self.container_name = kwargs.pop('container_name', None) or self.random_name()
         self.parameters = self.image.parameters + kwargs
         self.log.debug("New {}(container_name='{}')".format(self.__class__.__name__, self.container_name))
 

@@ -1,7 +1,53 @@
 # encoding: utf-8
 
 import collections
+from contextlib import contextmanager, nested
+import os
 import random
+import shutil
+import tempfile
+
+log = None
+
+global_temp_im_dir = '/tmp/temp_im'
+if not os.access(global_temp_im_dir, os.W_OK):
+    os.mkdir(global_temp_im_dir, 0766)
+
+
+@contextmanager
+def temp_file(file_name, content, context):
+    """
+    Manages a temp file life cycle.
+    The temp file content can be rendered from a template.
+    The context is enriched for nested tempfile
+    :param content: content or template
+    :param file_name: optional file name
+    :param context: context if content is a template
+    """
+    path = None
+    try:
+        dir = tempfile.mkdtemp(dir=global_temp_im_dir)
+        path = os.path.join(dir, file_name)
+        log.debug("Create temp file {}".format(path))
+        with open(path, 'w') as f:
+            f.write(render(content, context))
+        context[file_name] = path
+        yield path
+    finally:
+        if path:
+            log.debug("Remove temp file {}".format(path))
+            del context[file_name]
+            shutil.rmtree(dir, ignore_errors=True)
+
+
+def chain_temp_files(files, context):
+    return nested(*(temp_file(name, content, context) for name, content in files.iteritems()))
+
+
+def render(string, context):
+    if isinstance(string, unicode):
+        string = string.encode('utf-8')
+    return string.format(**context)
 
 
 def wait(iterable):
@@ -14,42 +60,3 @@ def wait(iterable):
 
 def random_hex(len=24):
     return ''.join(random.choice('0123456789abcdef') for _ in xrange(len))
-
-
-def render(string, context):
-    if isinstance(string, unicode):
-        string = string.encode('utf-8')
-    return string.format(context)
-
-
-class TransDict(dict):
-    def __getitem__(self, key):
-        try:
-            return dict.__getitem__(self, key)
-        except KeyError:
-            return key
-
-
-def find_image(id=None, name=None):
-    if id:
-        for img in docker_client.images():
-            if id == img['Id']:
-                return img
-    elif name:
-        for img in docker_client.images():
-            for t in img['RepoTags']:
-                if t.split(':')[0] == name:
-                    return img
-
-
-def find_container(container=None, image=None, ignore_state=True):
-    if container:
-        for cont in docker_client.containers(all=ignore_state):
-            if not image or cont['Image'].split(':')[0] == image:
-                for name in cont['Names']:
-                    if name[1:] == container:
-                        return cont
-    elif image:
-        for cont in docker_client.containers(all=ignore_state):
-            if cont['Image'].split(':')[0] == image:
-                return cont
