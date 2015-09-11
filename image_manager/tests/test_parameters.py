@@ -2,7 +2,15 @@
 
 import mock
 import os
-import unittest
+
+try:
+    import unittest
+except ImportError:
+    class unittest(object):
+        TestCase = object
+        @staticmethod
+        def main():
+            print("Please install unittest, or run with py.test")
 import sys
 sys.path.insert(1, os.path.abspath(os.path.join(__file__, '..', '..')))
 
@@ -16,7 +24,7 @@ class TestParameters(unittest.TestCase):
     def test_parameters_empty(self):
         drp = DIM.DockerRunParameters()
         assert isinstance(drp, dict)
-        self.assertDictContainsSubset(drp, dict(ports=set(), volumes=set()))
+        assert drp == {}
         assert hasattr(drp, 'kwargs')
         assert drp.kwargs == {}
         assert 'host_config' not in drp
@@ -54,7 +62,6 @@ class TestParameters(unittest.TestCase):
             85: None, 84: None, 83: 8003
         }}
         drp.add_port('80-82')
-        # ports are sorted
         assert drp['ports'] == set((80, 81, 82, 83, 84, 85))
         assert drp.kwargs == {u'port_bindings': {
             85: None, 84: None, 83: 8003, 82: None, 81: None, 80: None
@@ -89,12 +96,23 @@ class TestParameters(unittest.TestCase):
 class TestDockerImage(unittest.TestCase):
 
     def test_simple_image(self):
-        dim = DIM.DockerImageManager(image_name='toto')
-        assert dim.image_name == 'toto'
+        dim = DIM.DockerImageManager(image_name='navitia')
+        assert dim.image_name == 'navitia'
+        assert dim.parameters == {'image': 'navitia'}
         assert dim.log == DIM.log
         assert dim.dockerfile_string == None
         assert dim.dockerfile_name == None
-        DIM.log.debug.assert_called_with(u"New DockerImageManager(image_name='toto')")
+        DIM.log.debug.assert_called_with(u"New DockerImageManager(image_name='navitia')")
+
+
+class TestDockerContainer(unittest.TestCase):
+
+    def test_simple_container(self):
+        dcm = DIM.DockerImageManager(image_name='navitia').get_container('simple')
+        assert dcm.container_name == 'simple'
+        assert dcm.parameters == {'image': 'navitia', 'name': 'simple'}
+        assert dcm.log == DIM.log
+        DIM.log.debug.assert_called_with(u"New DockerContainerManager(container_name='simple')")
 
 
 if __name__ == '__main__':

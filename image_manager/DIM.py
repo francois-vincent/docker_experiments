@@ -14,6 +14,7 @@ class DockerRunParameters(dict):
     """
     A class to define parameters for the docker create/run commands.
     """
+    allowed = ()
 
     def __init__(self, **options):
         dict.__init__(self)
@@ -21,8 +22,6 @@ class DockerRunParameters(dict):
         ports = options.pop('ports', None)
         self.update(options)
         self.kwargs = {}
-        self['volumes'] = set()
-        self['ports'] = set()
         if volumes:
             for vol in volumes:
                 self.add_volume(vol)
@@ -33,6 +32,7 @@ class DockerRunParameters(dict):
 
     def add_volume(self, vol):
         binds = self.kwargs.setdefault('binds', {})
+        volumes = self.setdefault('volumes', set())
         host, guest = vol.split(':', 1)
         # default mode is 'rw', you can specify 'ro' instead
         if ':' in guest:
@@ -41,29 +41,30 @@ class DockerRunParameters(dict):
             mode = 'rw'
         host = os.path.abspath(os.path.expanduser(host))
         binds[host] = {'bind': guest, 'mode': mode}
-        self['volumes'].add(guest)
+        volumes.add(guest)
 
     def add_port(self, port):
         port_bindings = self.kwargs.setdefault('port_bindings', {})
+        ports = self.setdefault('ports', set())
         if isinstance(port, basestring):
             if ':' in port:
                 # TODO does not accept format host_ip:host_port:guest_port yet
                 host, guest = port.rsplit(':', 1)
                 guest = int(guest)
                 port_bindings[guest] = int(host)
-                self['ports'].add(guest)
+                ports.add(guest)
             elif '-' in port:
                 start, end = port.split('-')
                 for p in xrange(int(start), int(end) + 1):
                     port_bindings[p] = None
-                    self['ports'].add(p)
+                    ports.add(p)
             else:
                 port = int(port)
                 port_bindings[port] = None
-                self['ports'].add(port)
+                ports.add(port)
         else:
             port_bindings[port] = None
-            self['ports'].add(port)
+            ports.add(port)
 
     def finalize(self):
         if self.kwargs:
@@ -92,8 +93,8 @@ class DockerImageManager(object):
         self.dockerfile_name = kwargs.pop('dockerfile_name', None)
         if self.dockerfile_name:
             self.dockerfile_name = os.path.abspath(os.path.expanduser(self.dockerfile_name))
-        self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
         self.parameters = DockerRunParameters(**kwargs)
+        self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
 
     def get_dockerfile(self):
         """ Docker file is pecified either via a string or a file.
@@ -143,10 +144,10 @@ class DockerImageManager(object):
         return self
 
     def get_container(self, container_name=None):
-        return DockerContainerManager(self, container_name)
+        return DockerContainerManager(self, container_name=container_name)
 
     def create_container(self, container_name=None, start=True):
-        return DockerContainerManager(self, container_name).create_container(start)
+        return DockerContainerManager(self, container_name=container_name).create(start)
 
 
 class DockerContainerManager(object):
@@ -156,11 +157,24 @@ class DockerContainerManager(object):
     def __init__(self, image, **kwargs):
         self.image = image
         self.image_name = image.image_name
-        kwargs['name'] = self.container_name = kwargs.pop('container_name', self.image_name[:12] + '_' + random_hex(10))
+        self.log = image.log
+        kwargs['name'] = self.container_name = kwargs.pop('container_name', self.random_name())
         self.parameters = self.image.parameters + kwargs
+        self.log.debug("New {}(container_name='{}')".format(self.__class__.__name__, self.container_name))
 
-    def create(self, start=True):
-        if find_container(container=self.container_name):
+    def random_name(self):
+        return self.image_name[:12] + '_' + random_hex(11)
+
+    @property
+    def exists(self):
+        return bool(self.inspect('State.Running'))
+
+    @property
+    def is_running(self):
+        return self.inspect('State.Running') == 'true'
+
+    def create(self, start=True, allow_existing=False):
+        if self.exists and not allow_existing:
             raise RuntimeError("Container '{}' already exists".format(self.container_name))
         else:
             parameters = self.image.parameters + self.parameters
@@ -169,29 +183,37 @@ class DockerContainerManager(object):
             except docker.errors.APIError:
                 self.image.pull()
                 docker_client.create_container(**parameters)
-            if start:
-                self.start()
+        if start and not self.is_running:
+            self.start()
         return self
 
     def start(self):
         docker_client.start(self.container_name)
         return self
 
-    def inspect(self, field='NetworkSettings.IPAddress'):
-        config = docker_client.inspect_container(self.container_name)
-        if field:
-            for x in field.split('.'):
-                if x:
-                    config = config.get(x)
-        return config
+    def inspect(self, field='NetworkSettings.IPAddress', container_name=None):
+        try:
+            config = docker_client.inspect_container(container_name or self.container_name)
+            if field:
+                for x in field.split('.'):
+                    if x:
+                        config = config.get(x)
+            return config
+        except docker.errors.NotFound:
+            return None
 
-    def exec_container(self, cmd):
+    def exec_container(self, cmd, wait=True):
         id = docker_client.exec_create(self.container_name, cmd, stdout=False, stdin=False)
-        docker_client.exec_start(execid=id, detach=True)
+        docker_client.exec_start(execid=id, detach=not wait)
         return self
 
-    def copy_from_container(self, path):
-        return docker_client.copy(self.container_name, path)
+    def copy_from_container(self, guest_path, host_path=None):
+        data = docker_client.copy(self.container_name, guest_path)
+        if host_path:
+            with open(os.path.abspath(os.path.expanduser(host_path)), 'wb') as f:
+                f.write(data)
+        else:
+            return data
 
     def stop(self):
         docker_client.stop(self.container_name)

@@ -12,7 +12,7 @@ def wait(iterable):
                 raise RuntimeError("Build failed @" + line)
 
 
-def random_hex(len=32):
+def random_hex(len=24):
     return ''.join(random.choice('0123456789abcdef') for _ in xrange(len))
 
 
@@ -23,11 +23,11 @@ def render(string, context):
 
 
 class TransDict(dict):
-    def __getitem__(self, item):
+    def __getitem__(self, key):
         try:
-            return dict.__getitem__(self, item)
+            return dict.__getitem__(self, key)
         except KeyError:
-            return item
+            return key
 
 
 def find_image(id=None, name=None):
