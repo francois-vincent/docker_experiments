@@ -20,11 +20,13 @@ docker_client = docker.Client(base_url='unix://var/run/docker.sock', version='au
 class DockerRunParameters(dict):
     """
     A class to define parameters for the docker create/run commands.
+    Is also used to enrich Dockerfile EXPOSE and VOLUME instructions.
     """
     allowed = ()
 
     def __init__(self, **options):
         dict.__init__(self)
+        self.log = options.pop('log', log)
         volumes = options.pop('volumes', ())
         ports = options.pop('ports', ())
         self.update(options)
@@ -76,57 +78,47 @@ class DockerRunParameters(dict):
             self['host_config'] = docker.utils.create_host_config(**self.kwargs)
 
     def __add__(self, other):
+        # TODO provide true, chainable composition
         res = dict(self)
         res.update(other)
         return res
 
 
-class DockerImageManager(object):
+class DockerFile(object):
     """
-    A class to manage Docker images, wich features:
-    - Creating a new image out of a Dockerfile that can be inline or file,
-      raw or template.
-    - Running an image with a set of parameters.
-    - Pushing an image to dockerhub, provided the user is logged in.
-    An instance manages a single image.
+    A class to manage Dockerfile like objects
     """
-
-    def __init__(self, *files, **kwargs):
-        kwargs['image'] = self.image_name = kwargs.pop('image_name', None) or self.random_name()
-        self.log = kwargs.pop('log', log)
-        self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
-        # this is the universal context used by every template involved in the build process
-        # templates can be Dockerfile, configuration files, ...
-        self.template_context = kwargs.pop('template_context', None) or {}
-        self.parameters = DockerRunParameters(**kwargs)
-        self.files = {}
+    def __init__(self, *files, **options):
+        self.log = options.pop('log', log)
         # a file can be a real file, specified by a path,
         # or a pseudo file, specified via a (name, content) pair
+        self.files = {}
         for file in files:
             if isinstance(file, tuple):
                 name, content = file
             else:
                 name = os.path.basename(file)
-                with open(os.path.abspath(os.path.expanduser(file)), 'rb') as f:
+                with open(os.path.expanduser(file), 'rb') as f:
                     content = f.read()
-            if name == 'Dockerfile':
+            if name.lower() == 'dockerfile':
                 self.dockerfile = content
-                self.enrich_dockerfile()
             else:
                 self.files[name] = content
+        # this is the global context used by every template involved in the build process
+        # templates can be Dockerfile, configuration files, ...
+        self.template_context = options.pop('template_context', None) or {}
+        if not hasattr(self, 'dockerfile'):
+            raise ValueError("No Dockerfile specified")
 
-    @staticmethod
-    def random_name():
-        return random_hex()
-
-    def enrich_dockerfile(self):
-        if 'ports' in self.parameters and not '\nEXPOSE' in self.dockerfile:
-            ports = list(self.parameters['ports'])
+    def enrich_dockerfile(self, parameters):
+        self.dockerfile += '\n'
+        if 'ports' in parameters and not '\nEXPOSE' in self.dockerfile:
+            ports = list(parameters['ports'])
             ports.sort()
-            add_on = '\n\nEXPOSE ' + ' '.join(str(p) for p in ports)
+            add_on = '\nEXPOSE ' + ' '.join(str(p) for p in ports) + '\n'
             self.dockerfile += add_on
-        if 'volumes' in self.parameters and not '\nVOLUME' in self.dockerfile:
-            add_on = '\n\nVOLUME ["' + '" "'.join(str(p) for p in self.parameters['volumes']) + '"]'
+        if 'volumes' in parameters and not '\nVOLUME' in self.dockerfile:
+            add_on = '\nVOLUME ["' + '" "'.join(str(p) for p in parameters['volumes']) + '"]\n'
             self.dockerfile += add_on
 
     @contextmanager
@@ -137,21 +129,50 @@ class DockerImageManager(object):
         with chain_temp_files(self.files, self.template_context):
             yield BytesIO(render(self.dockerfile, self.template_context))
 
-    def pull(self, tag=None):
-        if tag:
-            docker_client.pull(self.image_name, tag)
-        else:
-            docker_client.pull(self.image_name)
+
+class DockerImageManager(object):
+    """
+    A class to manage Docker images, wich features:
+    - Creating a new image out of an existing image.
+    - Creating a new image out of a Dockerfile that can be inline or file,
+      raw or template.
+    - Running an image with a set of parameters.
+    - Pushing an image to dockerhub, provided the user is logged in.
+    An instance manages a single image.
+    """
+
+    def __init__(self, source, **kwargs):
+        self.source = source
+        kwargs['image'] = self.image_name = kwargs.pop('image_name', None) or self.random_name()
+        self.log = kwargs.pop('log', log)
+        self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
+        self.parameters = DockerRunParameters(**kwargs)
+
+    @staticmethod
+    def random_name():
+        return random_hex()
+
+    def pull(self):
+        docker_client.pull(self.source)
         return self
 
     def build(self):
         self.log.info("Building image {}".format(self.image_name))
-        with self.get_dockerfile() as dockerfile:
+        with self.source.get_dockerfile() as dockerfile:
             wait(docker_client.build(fileobj=dockerfile, tag=self.image_name, rm=True))
         return self
 
-    def push(self, image_name=None, tag=None):
+    def resolve_tag(self, image_name, tag):
         image_name = image_name or self.image_name
+        try:
+            image_name, _tag = image_name.split(':')
+            tag = tag or _tag
+        except ValueError:
+            pass
+        return image_name, tag
+
+    def push(self, image_name=None, tag=None):
+        image_name, tag = self.resolve_tag(image_name, tag)
         if tag:
             self.log.info("Pushing image '{}:{}'".format(image_name, tag))
             docker_client.push(image_name, tag)
@@ -163,8 +184,8 @@ class DockerImageManager(object):
     def inspect(self):
         return docker_client.inspect_image(image_id=self.image_name)
 
-    def remove_image(self, image_name=None):
-        image_name = image_name or self.image_name
+    def remove_image(self, image_name=None, tag=None):
+        image_name, tag = self.resolve_tag(image_name, tag)
         try:
             docker_client.remove_image(image=image_name)
             self.log.info("Removing image '{}'".format(image_name))

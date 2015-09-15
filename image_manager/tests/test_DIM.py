@@ -93,10 +93,38 @@ class TestParameters(unittest.TestCase):
         }
 
 
+dockerfile = """FROM ubuntu:14.04
+# Do nothing
+CMD ["/bin/cat"]
+"""
+dockerfile_result = """FROM ubuntu:14.04
+# Do nothing
+CMD ["/bin/cat"]
+
+
+EXPOSE 80 81 82 83 84 85
+
+VOLUME ["titi" "guest"]
+"""
+
+class TestDockerFile(unittest.TestCase):
+
+    def test_simple_case(self):
+        df = DIM.DockerFile(('Dockerfile', dockerfile))
+        drp = DIM.DockerRunParameters(
+            volumes=('toto:titi', 'host:guest:ro'),
+            ports=(85, '84', '8003:83', '80-82')
+        )
+        df.enrich_dockerfile(drp)
+        with df.get_dockerfile() as file:
+            data = file.read()
+        assert data == dockerfile_result
+
+
 class TestDockerImage(unittest.TestCase):
 
     def test_simple_image(self):
-        dim = DIM.DockerImageManager(image_name='navitia')
+        dim = DIM.DockerImageManager('toto', image_name='navitia')
         assert dim.image_name == 'navitia'
         assert dim.parameters == {'image': 'navitia'}
         assert dim.log == DIM.log
@@ -106,7 +134,7 @@ class TestDockerImage(unittest.TestCase):
 class TestDockerContainer(unittest.TestCase):
 
     def test_simple_container(self):
-        dcm = DIM.DockerImageManager(image_name='navitia').get_container('simple')
+        dcm = DIM.DockerImageManager('toto', image_name='navitia').get_container('simple')
         assert dcm.container_name == 'simple'
         assert dcm.parameters == {'image': 'navitia', 'name': 'simple'}
         assert dcm.log == DIM.log
