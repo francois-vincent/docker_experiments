@@ -5,10 +5,13 @@ DIM: Docker Image Manager
 A set of convenience classes to create and manage Docker Images and Containers
 """
 
+# TODO warning path out of build context !
+
 from __future__ import unicode_literals, print_function
 from contextlib import contextmanager
 from io import BytesIO
 import os
+ROOT = os.path.abspath(os.path.dirname(__file__))
 
 import docker
 
@@ -90,6 +93,9 @@ class DockerFile(object):
     """
     def __init__(self, *files, **options):
         self.log = options.pop('log', log)
+        # this is the global context used by every template involved in the build process
+        # templates can be Dockerfile, configuration files, ...
+        self.template_context = options.pop('template_context', None) or {}
         # a file can be a real file, specified by a path,
         # or a pseudo file, specified via a (name, content) pair
         self.files = {}
@@ -104,28 +110,35 @@ class DockerFile(object):
                 self.dockerfile = content
             else:
                 self.files[name] = content
-        # this is the global context used by every template involved in the build process
-        # templates can be Dockerfile, configuration files, ...
-        self.template_context = options.pop('template_context', None) or {}
+        self.__dict__.update(options)
         if not hasattr(self, 'dockerfile'):
             raise ValueError("No Dockerfile specified")
 
-    def enrich_dockerfile(self, parameters):
-        self.dockerfile += '\n'
-        if 'ports' in parameters and not '\nEXPOSE' in self.dockerfile:
-            ports = list(parameters['ports'])
+    def process_parameters(self):
+        if 'ports' in self.parameters and not '\nEXPOSE' in self.dockerfile:
+            ports = list(self.parameters['ports'])
             ports.sort()
-            add_on = '\nEXPOSE ' + ' '.join(str(p) for p in ports) + '\n'
-            self.dockerfile += add_on
-        if 'volumes' in parameters and not '\nVOLUME' in self.dockerfile:
-            add_on = '\nVOLUME ["' + '" "'.join(str(p) for p in parameters['volumes']) + '"]\n'
-            self.dockerfile += add_on
+            extension = '\nEXPOSE ' + ' '.join(str(p) for p in ports) + '\n'
+            self.dockerfile += extension
+        if 'volumes' in self.parameters and not '\nVOLUME' in self.dockerfile:
+            extension = '\nVOLUME ["' + '" "'.join(str(p) for p in self.parameters['volumes']) + '"]\n'
+            self.dockerfile += extension
+        return self
+
+    def process_addons(self):
+        if hasattr(self, 'add_ons'):
+            for add_on in self.add_ons:
+                with open(os.path.join(ROOT, 'addons', add_on)) as f:
+                    self.dockerfile += f.read()
+        return self
 
     @contextmanager
-    def get_dockerfile(self):
+    def get_dockerfile(self, process=True):
         """ Docker file is specified either via a string or a file.
             Then it is rendered according to an optional context (dictionary).
         """
+        if process:
+            self.process_addons().process_parameters()
         with chain_temp_files(self.files, self.template_context):
             yield BytesIO(render(self.dockerfile, self.template_context))
 
@@ -146,7 +159,7 @@ class DockerImageManager(object):
         kwargs['image'] = self.image_name = kwargs.pop('image_name', None) or self.random_name()
         self.log = kwargs.pop('log', log)
         self.log.debug("New {}(image_name='{}')".format(self.__class__.__name__, self.image_name))
-        self.parameters = DockerRunParameters(**kwargs)
+        self.parameters = kwargs.pop('parameters', None) or DockerRunParameters(**kwargs)
 
     @staticmethod
     def random_name():

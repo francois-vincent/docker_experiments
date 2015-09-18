@@ -1,0 +1,3 @@
+# set locale to French
+RUN sed -i "/^# fr_FR.UTF-8 UTF-8/c\fr_FR.UTF-8 UTF-8" /etc/locale.gen
+RUN locale-gen fr_FR.UTF-8

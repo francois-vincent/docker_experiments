@@ -1,5 +1,9 @@
 # encoding: utf-8
 
+
+def absjoin(*p):
+    return os.path.abspath(os.path.join(*p))
+
 import mock
 import os
 
@@ -12,7 +16,7 @@ except ImportError:
         def main():
             print("Please install unittest, or run with py.test")
 import sys
-sys.path.insert(1, os.path.abspath(os.path.join(__file__, '..', '..')))
+sys.path[0] = absjoin(__file__, '..', '..')
 
 import DIM
 DIM.log = mock.Mock()
@@ -101,24 +105,38 @@ dockerfile_result = """FROM ubuntu:14.04
 # Do nothing
 CMD ["/bin/cat"]
 
-
 EXPOSE 80 81 82 83 84 85
 
 VOLUME ["titi" "guest"]
 """
 
+
 class TestDockerFile(unittest.TestCase):
 
-    def test_simple_case(self):
-        df = DIM.DockerFile(('Dockerfile', dockerfile))
+    def test_alternate_dockerfile(self):
+        # specify Dockerfile as a string
+        df = DIM.DockerFile(dockerfile=dockerfile)
+        assert df.dockerfile == dockerfile
+        with open('./Dockerfile', 'w') as f:
+            f.write(dockerfile)
+        # specify Dockerfile as a file
+        df = DIM.DockerFile('./Dockerfile')
+        assert df.dockerfile == dockerfile
+
+    def test_parameters(self):
         drp = DIM.DockerRunParameters(
             volumes=('toto:titi', 'host:guest:ro'),
             ports=(85, '84', '8003:83', '80-82')
         )
-        df.enrich_dockerfile(drp)
+        df = DIM.DockerFile(dockerfile=dockerfile, parameters=drp)
+        df.process_parameters()
         with df.get_dockerfile() as file:
             data = file.read()
         assert data == dockerfile_result
+
+    def test_alternate_file(self):
+        df = DIM.DockerFile(('toto', 'toto'), ('titi', 'titi'), dockerfile=dockerfile)
+        assert df.files == dict(toto='toto', titi='titi')
 
 
 class TestDockerImage(unittest.TestCase):
@@ -129,6 +147,25 @@ class TestDockerImage(unittest.TestCase):
         assert dim.parameters == {'image': 'navitia'}
         assert dim.log == DIM.log
         DIM.log.debug.assert_called_with(u"New DockerImageManager(image_name='navitia')")
+
+    def test_random_name(self):
+        dim = DIM.DockerImageManager('toto')
+        assert dim.parameters == {'image': dim.image_name}
+        assert len(dim.image_name) == 24
+        for x in dim.image_name:
+            assert x in '0123456789abcdef'
+
+    def test_parameters(self):
+        dim = DIM.DockerImageManager('toto',
+            image_name='navitia_image',
+            hostname='test.docker',
+            volumes=('toto:titi', 'host:guest:ro'),
+            ports=(85, '84', '8003:83', '80-82')
+        )
+        assert dim.parameters['volumes'] == set((u'titi', u'guest'))
+        assert dim.parameters['ports'] == set((80, 81, 82, 83, 84, 85))
+        assert dim.parameters['image'] == 'navitia_image'
+        assert dim.parameters['hostname'] == 'test.docker'
 
 
 class TestDockerContainer(unittest.TestCase):

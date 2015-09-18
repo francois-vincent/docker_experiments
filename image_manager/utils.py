@@ -14,6 +14,10 @@ if not os.access(global_temp_im_dir, os.W_OK):
     os.mkdir(global_temp_im_dir, 0766)
 
 
+def absjoin(*p):
+    return os.path.abspath(os.path.join(*p))
+
+
 @contextmanager
 def temp_file(file_name, content, context):
     """

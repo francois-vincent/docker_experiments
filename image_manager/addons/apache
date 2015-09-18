@@ -1,0 +1,6 @@
+RUN apt-get install -y apache2 libapache2-mod-wsgi
+
+# set basic Apache config
+RUN mkdir /etc/apache2/conf.d
+RUN echo "ServerName localhost" >> /etc/apache2/apache2.conf
+RUN echo "Include conf.d/" >> /etc/apache2/apache2.conf

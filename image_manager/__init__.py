@@ -6,6 +6,12 @@ import sys
 import DIM, utils
 
 
+log_levels = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+}
+
 def get_stdout_logger(log_level, name=__name__):
     log = logging.getLogger(name)
     out_hdlr = logging.StreamHandler(sys.stdout)

@@ -1,0 +1,4 @@
+# add user as a sudoer (for later tests and debug)
+RUN useradd -m -s /bin/bash {user} && echo "{user}:{password}" | chpasswd
+RUN adduser {user} sudo && adduser {user} www-data; exit 0
+RUN echo "{user} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
