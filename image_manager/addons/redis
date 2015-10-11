@@ -1,4 +1,0 @@
-RUN apt-get install -y redis-server
-
-# change redis-server conf for not daemonize (for supervisord)
-RUN sed -i '/^daemonize yes/c\daemonize no' /etc/redis/redis.conf
